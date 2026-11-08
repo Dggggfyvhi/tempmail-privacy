@@ -337,13 +337,13 @@ function copyTextById(v){(navigator.clipboard?navigator.clipboard.writeText(v):P
 function focusLatest(){const m=document.querySelector('.mail');if(m){m.classList.add('open');m.scrollIntoView({behavior:'smooth',block:'center'})}$('newMail').classList.remove('show')}
 function extractOtp(s){const m=String(s).match(/(\d{4,8})/);return m?m[1]:null}
 
-/* ================= 临时手机号（公开接码站聚合，浏览器直连） ================= */
-// 多家接码站（从各站页面 HTML 里扒号码，不依赖单一站）
-const SMS_SITES=[
-  {name:'sms-online.cc',  list:'https://sms-online.cc/en/receive-sms/China/',     sms:n=>'https://sms-online.cc/en/receive-sms/China/'+n},
-  {name:'sms-online.ir',  list:'https://sms-online.ir/en/receive-sms/China/',     sms:n=>'https://sms-online.ir/en/receive-sms/China/'+n},
-  {name:'receive-sms.cc', list:'https://receive-sms.cc/en/receive-sms/China/',    sms:n=>'https://receive-sms.cc/en/receive-sms/China/'+n},
-  {name:'smstome',        list:'https://www.smstome.com/86-China',               sms:n=>'https://www.smstome.com/86-China/'+n},
+/* ================= 临时手机号（smsonline.cloud 公开接码，浏览器直开） ================= */
+// smsonline.cloud 的公共号码页在浏览器里可直接打开并实时刷新短信（X-Frame-Options 禁止嵌入，所以用新窗口/当前页直开）
+// 这里维护一份已知可用 +86 公共号池，来自 smsonline.cloud 中国号码列表页
+const SMS_POOL=[
+  '8616299592038','8616284392664','8616288493729','8616259413748',
+  '8613491450961','8613040148625','8613174917203','8613037318452',
+  '8613970277792','8615916125370','8618000002689','8613235674020'
 ];
 const COUNTRIES=[
   {code:'China',cn:'中国',dial:'+86'},
@@ -353,77 +353,39 @@ const COUNTRIES=[
   {code:'Canada',cn:'加拿大',dial:'+1'},
   {code:'Australia',cn:'澳大利亚',dial:'+61'}
 ];
-let SMS={sel:'China',site:0,phone:'',pollTimer:null};
+let SMS={sel:'China',phone:'',used:new Set()};
+
+function smsPageUrl(n){return 'https://www.smsonline.cloud/zh/free_sms_number/+'+n}
 
 function renderCountries(){
   $('countries').innerHTML=COUNTRIES.map(c=>
     `<div class="country ${SMS.sel===c.code?'sel':''}" onclick="selCountry('${c.code}')">
       <span>${c.dial} ${c.cn}</span><small>免费公共号</small></div>`).join('');
-  if($('siteLabel'))$('siteLabel').textContent='数据源：'+SMS_SITES[SMS.site].name;
 }
-function selCountry(c){SMS.sel=c;SMS.site=0;$('phAddr').value='';$('phCopy').style.display='none';renderCountries();stopSmsPoll();}
+function selCountry(c){SMS.sel=c;SMS.phone='';SMS.used=new Set();$('phAddr').value='';$('phCopy').style.display='none';renderCountries();}
 
-// 从接码站 HTML 扒号码（兼容多种站写法）
-function parseNumbers(html){
-  const nums=new Set();let m;
-  const re1=/\/receive-sms\/[A-Za-z]+\/(\d{9,14})/g;
-  while((m=re1.exec(html)))nums.add(m[1]);
-  const re2=/href="[^"]*\/(\d{10,14})[^"]*"/g;
-  while((m=re2.exec(html)))nums.add(m[1]);
-  const re3=/>(\d{11})</g;
-  while((m=re3.exec(html)))nums.add(m[1]);
-  return[...nums].filter(n=>n.length>=9&&n.length<=14);
-}
-function parseSms(html){
-  const tmp=document.createElement('div');tmp.innerHTML=html;
-  const out=[];
-  tmp.querySelectorAll('td,div.msg,div.sms,li,p').forEach(el=>{
-    const s=(el.textContent||'').trim();
-    if(s&&s.length>6&&s.length<400&&!/^(China|USA|UK|Receive|Home|SMS|No new)/.test(s)&&!/^\d+$/.test(s))out.push(s);
-  });
-  return[...new Set(out)].slice(0,6);
-}
-async function fetchSite(url){const r=await fetch(url,{redirect:'follow',cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);return r.text()}
-
-async function getPhone(){
-  stopSmsPoll();
-  $('phBtn').textContent='取号中…';
-  const start=SMS.site;let lastErr='';
-  for(let i=0;i<SMS_SITES.length;i++){
-    const idx=(start+i)%SMS_SITES.length;const site=SMS_SITES[idx];
-    try{
-      const html=await fetchSite(site.list);
-      const nums=parseNumbers(html);
-      if(nums.length){
-        SMS.site=idx;SMS.phone=pick(nums);
-        $('phAddr').value='+'+SMS.phone;
-        $('phCopy').style.display='inline-block';
-        $('smsBox').classList.add('show');$('smsBox').textContent='号码 +'+SMS.phone+' 已就绪（'+site.name+'）。注册网站后点「刷新短信」。';
-        if($('siteLabel'))$('siteLabel').textContent='数据源：'+site.name;
-        startSmsPoll();
-        toast('已取号 +'+SMS.phone);
-        return;
-      }
-      lastErr=site.name+' 暂无号码';
-    }catch(e){lastErr=site.name+'：'+(e.message||e)}
+function getPhone(){
+  if(SMS.sel!=='China'){toast('暂只提供 +86 中国公共号');return}
+  let n;
+  do{n=pick(SMS_POOL)}while(SMS.used.has(n)&&SMS.used.size<SMS_POOL.length);
+  SMS.used.add(n);
+  SMS.phone=n;
+  $('phAddr').value='+'+n;
+  $('phCopy').style.display='inline-block';
+  // 提供「打开验证页」按钮（新标签页直开 smsonline.cloud，短信实时出现）
+  let openBtn=$('phOpen');
+  if(!openBtn){
+    openBtn=document.createElement('button');openBtn.id='phOpen';openBtn.className='act';openBtn.style.marginTop='10px';
+    openBtn.onclick=()=>window.open(smsPageUrl(SMS.phone),'_blank');
+    document.querySelector('#view-sms .card').appendChild(openBtn);
   }
-  toast('取号失败（'+lastErr+'），可再点一次或选别的国家');
-  $('phBtn').textContent='获取号码';
+  openBtn.style.display='inline-block';openBtn.textContent='打开验证页（短信实时显示）';
+  $('smsBox').classList.add('show');
+  $('smsBox').textContent='号码 +'+n+' 已就绪。复制它去网站注册，验证码会实时出现在验证页。';
+  toast('已取号 +'+n);
 }
 
-function startSmsPoll(){clearInterval(SMS.pollTimer);SMS.pollTimer=setInterval(()=>pollSms(false),12000)}
-function stopSmsPoll(){clearInterval(SMS.pollTimer)}
-async function pollSms(manual){
-  if(!SMS.phone)return;
-  const site=SMS_SITES[SMS.site];
-  try{
-    const html=await fetchSite(site.sms(SMS.phone));
-    const box=$('smsBox');box.classList.add('show');
-    const lines=parseSms(html);
-    box.innerHTML=lines.length?lines.map(esc).join('<br>'):'暂无短信。';
-    if(manual)toast(lines.length?'收到新短信':'暂无短信');
-  }catch(e){if(manual)toast('刷新失败：'+e.message)}
-}
+function pollSms(manual){getPhone()} // 保留按钮绑定，实际等价于再取一个号
 
 /* ================= 初始化 ================= */
 renderCountries();
