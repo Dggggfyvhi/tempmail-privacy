@@ -134,7 +134,8 @@ button.act.ghost{background:#eef2fb;color:var(--accent)}
           <button class="act ghost" onclick="destroyMail()">销毁当前</button>
           <button class="act alt" onclick="checkInbox(true)">刷新收件箱</button>
         </div>
-        <div class="hint">邮箱 72 小时内有效。销毁后地址即失效，历史邮件清空。</div>
+        <div class="hint">多渠道自动切换：主力 tempmail.ing，备用 mail.tm / maildrop.cc。销毁后地址即失效，历史邮件清空。</div>
+        <div id="inboxTitle" class="hint" style="margin-top:6px;font-weight:600;color:var(--accent)"></div>
 
         <!-- 收件箱 -->
         <div class="mailbox" id="inbox">
@@ -191,69 +192,116 @@ function esc(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt
 function sleep(ms){return new Promise(r=>setTimeout(r,ms))}
 function pick(arr){return arr[Math.floor(Math.random()*arr.length)]}
 
-/* ================= 临时邮箱 (mail.tm) ================= */
-const API='https://api.mail.tm';
-let SES=null; // {token, address, domain, msgIds:Set}
-
-async function mailtm(path,opt={}){
-  const o={headers:{'Content-Type':'application/json',...opt.headers}};
-  if(opt.auth) o.headers.Authorization='Bearer '+SES.token;
-  const r=await fetch(API+path,{method:opt.method||'GET',...o});
-  if(!r.ok){const t=await r.text();throw new Error('HTTP '+r.status+' '+t.slice(0,80))}
-  return r.json();
-}
+/* ================= 临时邮箱（多渠道聚合，自动切换） ================= */
+let SES=null; // {name, fns:{create,list,detail}, state:{address,token,user,pwd,msgIds}, msgCache:[]}
+// 按网络可达性排序：tempmail.ing(CORS *) 优先，mail.tm 次之，maildrop.cc 兜底
+const PROVIDERS=[
+  {
+    name:'tempmail.ing',
+    create:async()=>{
+      const r=await fetch('https://api.tempmail.ing/api/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({duration:10})});
+      if(!r.ok)throw new Error('ing '+r.status);
+      const d=await r.json();const addr=d.email.address;
+      return{address:addr,meta:{token:addr,user:addr}};
+    },
+    list:async(st)=>{
+      const r=await fetch('https://api.tempmail.ing/api/emails/'+st.meta.token);if(!r.ok)throw new Error('ing '+r.status);
+      const d=await r.json();
+      return(d.emails||[]).map(e=>({id:e.id,from:e.from_address,subject:e.subject,text:e.text||'',html:e.content||''}));
+    }
+  },
+  {
+    name:'mail.tm',
+    create:async()=>{
+      const H={'Content-Type':'application/json','Accept':'application/ld+json'};
+      const dr=await fetch('https://api.mail.tm/domains',{headers:H});if(!dr.ok)throw new Error('tm domains '+dr.status);
+      const dd=await dr.json();const dom=dd['hydra:member'].find(x=>x.isActive).domain;
+      const user=Array.from({length:8},()=>pick('abcdefghjkmnpqrstuvwxyz23456789')).join('')+'@'+dom;
+      const pwd=Array.from({length:16},()=>pick('abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789')).join('');
+      const ar=await fetch('https://api.mail.tm/accounts',{method:'POST',headers:H,body:JSON.stringify({address:user,password:pwd})});
+      if(!ar.ok)throw new Error('tm account '+ar.status);
+      const tr=await fetch('https://api.mail.tm/token',{method:'POST',headers:H,body:JSON.stringify({address:user,password:pwd})});
+      if(!tr.ok)throw new Error('tm token '+tr.status);
+      const tk=await tr.json();
+      return{address:user,meta:{token:tk.token,user:user,pwd:pwd}};
+    },
+    list:async(st)=>{
+      const H={'Authorization':'Bearer '+st.meta.token,'Accept':'application/ld+json'};
+      const r=await fetch('https://api.mail.tm/messages',{headers:H});if(!r.ok)throw new Error('tm msg '+r.status);
+      const d=await r.json();
+      return(d['hydra:member']||[]).map(m=>({id:m.id,from:m.from?.address,subject:m.subject,intro:m.intro||''}));
+    },
+    detail:async(st,m)=>{
+      const r=await fetch('https://api.mail.tm/messages/'+m.id,{headers:{'Authorization':'Bearer '+st.meta.token,'Accept':'application/ld+json'}});
+      if(!r.ok)throw new Error('tm detail '+r.status);
+      const d=await r.json();return{from:d.from?.address,subject:d.subject,text:d.text||'',html:d.html||''};
+    }
+  },
+  {
+    name:'maildrop.cc',
+    create:async()=>{
+      const user=Array.from({length:8},()=>pick('abcdefghjkmnpqrstuvwxyz23456789')).join('');
+      return{address:user+'@maildrop.cc',meta:{user:user,token:user}};
+    },
+    list:async(st)=>{
+      const r=await fetch('https://api.maildrop.cc/graphql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:'query { inbox(mailbox:"'+st.meta.user+'") { id headerfrom subject date } }'})});
+      if(!r.ok)throw new Error('md '+r.status);
+      const d=await r.json();
+      return((d.data&&d.data.inbox)||[]).map(m=>({id:m.id,from:m.headerfrom,subject:m.subject,intro:m.subject||''}));
+    },
+    detail:async(st,m)=>{
+      const r=await fetch('https://api.maildrop.cc/graphql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:'query { message(mailbox:"'+st.meta.user+'", id:"'+m.id+'") { id headerfrom subject date data html } }'})});
+      if(!r.ok)throw new Error('md detail '+r.status);
+      const d=await r.json();const msg=(d.data&&d.data.message)||{};
+      return{from:msg.headerfrom,subject:msg.subject,text:msg.data||'',html:msg.html||''};
+    }
+  }
+];
 
 async function genMail(force){
-  try{
-    if(SES && !force){ // 已存在，仅保证显示
-      if(!$('emailAddr').value) $('emailAddr').value=SES.address;
+  if(SES&&!force){if(!$('emailAddr').value)$('emailAddr').value=SES.state.address;$('copyBtn').style.display='inline-block';return}
+  $('genBtn').textContent='生成中…';
+  let lastErr='';
+  for(const p of PROVIDERS){
+    try{
+      const res=await p.create();
+      SES={name:p.name,fns:{list:p.list,detail:p.detail},state:{address:res.address,token:res.meta.token,user:res.meta.user,pwd:res.meta.pwd,msgIds:new Set()}};
+      $('emailAddr').value=res.address;
       $('copyBtn').style.display='inline-block';
+      $('inbox').innerHTML='<div class="hint">收件箱为空。复制上方邮箱去网站注册，收到的信会自动出现在这里（每 8 秒刷新一次）。</div>';
+      $('inboxTitle')&&($('inboxTitle').textContent='（'+p.name+'）');
+      toast('已生成 '+res.address+' ['+p.name+']');
+      startPolling();
       return;
-    }
-    $('genBtn').textContent='生成中…';
-    const domains=await mailtm('/domains');
-    const dom=pick(domains.hydra.member.filter(d=>d.isActive)).domain;
-    const addr=pick(['f','k','n','m','a','q','z'])+Math.random().toString(36).slice(2,8)+'@'+dom;
-    const pass=pick('ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789').split('').concat(Array.from({length:15},()=>pick('abcdefghijkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789'))).join('');
-    await mailtm('/accounts',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:addr,password:pass})});
-    const tok=await mailtm('/token',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:addr,password:pass})});
-    SES={token:tok.token,address:addr,domain:dom,msgIds:new Set(),polling:false};
-    $('emailAddr').value=addr;
-    $('copyBtn').style.display='inline-block';
-    $('inbox').innerHTML='<div class="hint">收件箱为空。复制上方邮箱去网站注册，收到的信会自动出现在这里（每 8 秒刷新一次）。</div>';
-    toast('已生成 '+addr);
-    startPolling();
-  }catch(e){toast('生成失败：'+e.message);$('genBtn').textContent='获取邮箱'}
-  finally{$('genBtn').textContent='获取邮箱'}
+    }catch(e){lastErr=p.name+'：'+(e.message||e)}
+  }
+  toast('全部渠道失败：'+lastErr);
+  $('genBtn').textContent='获取邮箱';
 }
 
 async function destroyMail(){
-  if(!SES)return;
-  try{await mailtm('/accounts/'+encodeURIComponent(SES.address),{method:'DELETE',auth:true})}catch(_){}
-  SES=null;stopPolling();
+  if(!SES)return;stopPolling();
+  SES=null;
   $('emailAddr').value='';$('copyBtn').style.display='none';
-  $('inbox').innerHTML='<div class="hint">收件箱已销毁。</div>';
+  if($('inboxTitle'))$('inboxTitle').textContent='';
+  $('inbox').innerHTML='<div class="hint">收件箱已销毁，点「获取邮箱」重新生成。</div>';
   $('newMail').classList.remove('show');
   toast('当前邮箱已销毁');
 }
 
 async function checkInbox(manual){
-  if(!SES||SES.polling&&!manual)return;
+  if(!SES)return;
+  if(SES.polling&&!manual)return;
   SES.polling=manual;
   try{
-    const list=await mailtm('/messages',{auth:true});
-    const msgs=list.hydra.member||[];
-    const fresh=[];
-    for(const m of msgs){if(!SES.msgIds.has(m.id))fresh.push(m)}
+    const msgs=await SES.fns.list(SES.state);
+    const fresh=[];for(const m of msgs){if(!SES.state.msgIds.has(m.id))fresh.push(m)}
     if(fresh.length){
-      SES.msgIds=new Set(msgs.map(m=>m.id));
+      SES.state.msgIds=new Set(msgs.map(m=>m.id));
       renderInbox(msgs);
-      if(manual===true){focusLatest()}else{
-        $('newMailText').textContent='收到 '+fresh.length+' 封新邮件，点击查看';
-        $('newMail').classList.add('show');
-      }
-    } else if(manual===true && msgs.length){focusLatest()}
-  }catch(_){}
+      if(manual===true){focusLatest()}else{$('newMailText').textContent='收到 '+fresh.length+' 封新邮件，点击查看';$('newMail').classList.add('show')}
+    }else if(manual===true&&msgs.length){focusLatest()}
+  }catch(e){if(manual===true)toast('刷新失败：'+(e.message||e))}
   SES.polling=false;
 }
 function startPolling(){clearInterval(window._tp);window._tp=setInterval(()=>checkInbox(false),8000)}
@@ -265,9 +313,9 @@ function renderInbox(msgs){
   box.innerHTML='';
   msgs.slice().reverse().forEach(m=>{
     const div=document.createElement('div');div.className='mail';
-    const code=extractOtp(m.subject+' '+(m.intro||''));
+    const code=extractOtp((m.subject||'')+' '+(m.intro||''));
     div.innerHTML=`
-      <div class="from">${esc(m.from?.address||'未知发件人')}${m.from?.name?' · '+esc(m.from.name):''} · ${esc(m.subject||'(无主题)')}</div>
+      <div class="from">${esc(m.from||'未知发件人')} · ${esc(m.subject||'(无主题)')}</div>
       ${code?`<span class="otp" data-copy="${esc(code)}">${esc(code)}<small>点击复制验证码</small></span>`:''}
       <div class="body"></div>`;
     div.onclick=async(e)=>{
@@ -275,23 +323,19 @@ function renderInbox(msgs){
       div.classList.toggle('open');
       if(div.classList.contains('open')&&!div.dataset.fetched){
         div.dataset.fetched='1';
-        const body=div.querySelector('.body');body.textContent='正在载入全文…';
-        try{const full=await mailtm('/messages/'+m.id,{auth:true});
-          let t=(full.text||'');
-          if(!t&&full.html){const p=document.createElement('div');p.innerHTML=full.html;t=p.textContent||''}
-          body.textContent=t||'(空邮件)';
-        }catch(_){body.textContent='加载失败'}
+        const body=div.querySelector('.body');
+        if(m.text||m.html){body.textContent=m.text||htmlToText(m.html);return}
+        if(SES&&SES.fns.detail){body.textContent='正在载入全文…';try{const full=await SES.fns.detail(SES.state,m);body.textContent=full.text||htmlToText(full.html)||'(空邮件)'}catch(_){body.textContent='加载失败'}}
+        else{body.textContent='(此渠道不提供全文)'}
       }
     };
     box.appendChild(div);
   });
 }
+function htmlToText(h){if(!h)return'';const d=document.createElement('div');d.innerHTML=h;return(d.textContent||'').trim()}
 function copyTextById(v){(navigator.clipboard?navigator.clipboard.writeText(v):Promise.reject()).then(()=>toast('验证码已复制 '+v)).catch(()=>toast('复制失败'))}
 function focusLatest(){const m=document.querySelector('.mail');if(m){m.classList.add('open');m.scrollIntoView({behavior:'smooth',block:'center'})}$('newMail').classList.remove('show')}
-function extractOtp(s){
-  const m=String(s).match(/(\d{4,8})/);
-  return m?m[1]:null;
-}
+function extractOtp(s){const m=String(s).match(/(\d{4,8})/);return m?m[1]:null}
 
 /* ================= 临时手机号 (+86) ================= */
 const COUNTRIES=[
