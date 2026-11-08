@@ -158,7 +158,7 @@ button.act.ghost{background:#eef2fb;color:var(--accent)}
         </div>
         <div class="sms" id="smsBox">尚未查询到短信。注册网站后回到这里，点「刷新短信」。</div>
         <div class="row" style="margin-top:10px">
-          <button class="act alt" onclick="pollSms(true)">刷新短信</button>
+          <button class="act alt" onclick="pollSms()">刷新短信</button>
           <button class="act ghost" onclick="getPhone()">换一个号</button>
         </div>
         <div class="hint">短信来自公开接码站，24 小时内有效。仅用于接收注册验证码，勿接收银行 / 密码类短信。</div>
@@ -337,13 +337,12 @@ function copyTextById(v){(navigator.clipboard?navigator.clipboard.writeText(v):P
 function focusLatest(){const m=document.querySelector('.mail');if(m){m.classList.add('open');m.scrollIntoView({behavior:'smooth',block:'center'})}$('newMail').classList.remove('show')}
 function extractOtp(s){const m=String(s).match(/(\d{4,8})/);return m?m[1]:null}
 
-/* ================= 临时手机号（smsonline.cloud 公开接码，浏览器直开） ================= */
-// smsonline.cloud 的公共号码页在浏览器里可直接打开并实时刷新短信（X-Frame-Options 禁止嵌入，所以用新窗口/当前页直开）
-// 这里维护一份已知可用 +86 公共号池，来自 smsonline.cloud 中国号码列表页
+/* ================= 临时手机号（smsonline.cloud 公共号，跳转式，零跨域） ================= */
+// 公共号池（来自 smsonline.cloud 中国页；号在官方页实时收短信）
 const SMS_POOL=[
-  '8616299592038','8616284392664','8616288493729','8616259413748',
-  '8613491450961','8613040148625','8613174917203','8613037318452',
-  '8613970277792','8615916125370','8618000002689','8613235674020'
+ '8616299592038','8616284392664','8616288493729','8616259413748',
+ '8613491450961','8613040148625','8613174917203','8613037318452',
+ '8613970277792','8615916125370','8618000002689','8613235674020'
 ];
 const COUNTRIES=[
   {code:'China',cn:'中国',dial:'+86'},
@@ -355,7 +354,7 @@ const COUNTRIES=[
 ];
 let SMS={sel:'China',phone:'',used:new Set()};
 
-function smsPageUrl(n){return 'https://www.smsonline.cloud/zh/free_sms_number/+'+n}
+function smsPage(n){return 'https://www.smsonline.cloud/zh/free_sms_number/+'+n}
 
 function renderCountries(){
   $('countries').innerHTML=COUNTRIES.map(c=>
@@ -365,28 +364,25 @@ function renderCountries(){
 function selCountry(c){SMS.sel=c;SMS.phone='';SMS.used=new Set();$('phAddr').value='';$('phCopy').style.display='none';renderCountries();}
 
 function getPhone(){
-  if(SMS.sel!=='China'){toast('暂只提供 +86 中国公共号');return}
+  if(SMS.sel!=='China'){toast('当前仅提供 +86 中国公共号');return}
   let n;
   do{n=pick(SMS_POOL)}while(SMS.used.has(n)&&SMS.used.size<SMS_POOL.length);
-  SMS.used.add(n);
-  SMS.phone=n;
+  SMS.used.add(n);SMS.phone=n;
   $('phAddr').value='+'+n;
   $('phCopy').style.display='inline-block';
-  // 提供「打开验证页」按钮（新标签页直开 smsonline.cloud，短信实时出现）
   let openBtn=$('phOpen');
   if(!openBtn){
-    openBtn=document.createElement('button');openBtn.id='phOpen';openBtn.className='act';openBtn.style.marginTop='10px';
-    openBtn.onclick=()=>window.open(smsPageUrl(SMS.phone),'_blank');
+    openBtn=document.createElement('button');openBtn.id='phOpen';openBtn.className='act';
+    openBtn.style.marginTop='10px';
+    openBtn.onclick=()=>window.open(smsPage(SMS.phone),'_blank');
     document.querySelector('#view-sms .card').appendChild(openBtn);
   }
   openBtn.style.display='inline-block';openBtn.textContent='打开验证页（短信实时显示）';
   $('smsBox').classList.add('show');
-  $('smsBox').textContent='号码 +'+n+' 已就绪。复制它去网站注册，验证码会实时出现在验证页。';
+  $('smsBox').textContent='号码 +'+n+' 已就绪。复制它去目标网站注册，验证码会实时显示在验证页。';
   toast('已取号 +'+n);
 }
-
-function pollSms(manual){getPhone()} // 保留按钮绑定，实际等价于再取一个号
-
+function pollSms(){getPhone()}
 /* ================= 初始化 ================= */
 renderCountries();
 // 首次进来自动生成一个邮箱，方便直接复制
